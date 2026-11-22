@@ -542,20 +542,20 @@ infra/tools/luci/luci-auth-ssh-plugin/windows-arm64
 	dOJyXqvy1FnW2Q26Guo3sV_zakrKxJUnR_XTxWKwAPYC
 
 infra/tools/luci/luci/linux-amd64
-	git_revision:9fe5fef212ec9c376f658dce50162514dababfe4
-	t7JvAsjgSt10s8sl-ByYCzkSM1O-Rcvfk2VNEnqXEhkC
+	git_revision:1b58f0e1f7b33b6be54d1bdde27f3ce595308956
+	2UDvzfhU4uskcFB7nucpAvtFDXyhVxNG8XX7e_wkVvoC
 
 infra/tools/luci/luci/linux-arm64
-	git_revision:9fe5fef212ec9c376f658dce50162514dababfe4
-	jQJ0znRwgjZ75h-7WJJWVIxN7XLLgyz09ae8H34aCKgC
+	git_revision:1b58f0e1f7b33b6be54d1bdde27f3ce595308956
+	UoccxNWnNYaGc92XqvNMJL6abWL3LgtKezpdN1MTEXwC
 
 infra/tools/luci/luci/mac-amd64
-	git_revision:9fe5fef212ec9c376f658dce50162514dababfe4
-	DveirP3w1jN5h5EBAKJrixs-F1YDSCsvlGqYtjaCxGAC
+	git_revision:1b58f0e1f7b33b6be54d1bdde27f3ce595308956
+	JXoEL0vjkifmxBdyrVovRfMU1u1yBPASxp0DNXyisjUC
 
 infra/tools/luci/luci/mac-arm64
-	git_revision:9fe5fef212ec9c376f658dce50162514dababfe4
-	G19ag3gP96h-_IGDzSbb3Sv6XQtzSmU4iPFfgxwYecAC
+	git_revision:1b58f0e1f7b33b6be54d1bdde27f3ce595308956
+	HUwzzLxzHqtEL3y5w13iCNlKOrKx51Xkw5bndIToDggC
 
 infra/tools/luci/lucicfg/linux-386
 	git_revision:7295014ab5574b6cbdbe9c50eb7d9367f1ffd065
