@@ -60,7 +60,7 @@ infra/tools/luci/luci-auth-ssh-plugin/${platform} git_revision:9fe5fef212ec9c376
 infra/tools/luci/luci-auth-ssh-helper/${platform} git_revision:9fe5fef212ec9c376f658dce50162514dababfe4
 
 # Crowbar CLI
-infra/tools/crowbar/${platform=linux-amd64,linux-arm64,mac-amd64,mac-arm64,windows-amd64,windows-arm64} git_revision:09c19fa2237c895bdb1ce9ad7910a77cc79c1e94
+infra/tools/crowbar/${platform=linux-amd64,linux-arm64,mac-amd64,mac-arm64,windows-amd64,windows-arm64} git_revision:a24aabbf27ae2e5c0c8b10b04b13f6969863f15a
 
 # LUCI CLI
 infra/tools/luci/luci/${platform=linux-amd64,linux-arm64,mac-amd64,mac-arm64} git_revision:1b58f0e1f7b33b6be54d1bdde27f3ce595308956
