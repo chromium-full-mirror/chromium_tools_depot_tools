@@ -34,6 +34,10 @@ def write(filename, content):
 class AutoninjaTest(trial_dir.TestCase):
     def setUp(self):
         super(AutoninjaTest, self).setUp()
+        mock.patch.dict(
+            os.environ, {"DEPOT_TOOLS_BUILD_TELEMETRY": "0"}
+        ).start()
+        self.addCleanup(mock.patch.stopall)
         self.previous_dir = os.getcwd()
         os.chdir(self.root_dir)
 

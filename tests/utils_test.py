@@ -112,13 +112,11 @@ class CacheDirTest(unittest.TestCase):
 class ConfigPathTest(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.mkdtemp(prefix="utils_test")
-        self.config_dir = os.path.join(self.temp_dir, "test_files")
+        self.legacy_dir = os.path.join(self.temp_dir, "legacy")
+        self.config_dir = os.path.join(self.temp_dir, "config")
+        os.makedirs(self.legacy_dir)
 
-        self.isfile = mock.Mock()
-        self.move = mock.Mock()
-
-        mock.patch("os.path.isfile", self.isfile).start()
-        mock.patch("shutil.move", self.move).start()
+        mock.patch("utils.DEPOT_TOOLS_ROOT", self.legacy_dir).start()
         mock.patch(
             "utils.depot_tools_config_dir", lambda: self.config_dir
         ).start()
@@ -126,35 +124,73 @@ class ConfigPathTest(unittest.TestCase):
         self.addCleanup(mock.patch.stopall)
         self.addCleanup(shutil.rmtree, self.temp_dir)
 
-    def testCreatesConfigDir(self):
-        # Ensure "legacy path" doesn't exist so that nothing gets moved.
-        def EnsureLegacyPathNotExists(path):
-            return path != os.path.join(DEPOT_TOOLS_ROOT, "metrics.cfg")
-
-        self.isfile.side_effect = EnsureLegacyPathNotExists
+    def testConfigPathDoesNotMutate(self):
+        legacy_path = os.path.join(self.legacy_dir, "metrics.cfg")
+        with open(legacy_path, "w") as f:
+            f.write("{}")
 
         self.assertEqual(
             os.path.join(self.config_dir, "metrics.cfg"),
             utils.depot_tools_config_path("metrics.cfg"),
         )
-        self.assertTrue(os.path.exists(self.config_dir))
-        self.move.assert_not_called()
+        self.assertFalse(os.path.exists(self.config_dir))
+        self.assertTrue(os.path.isfile(legacy_path))
 
-    def testMovesLegacy(self):
-        # Ensure "legacy path" exists so that it gets moved.
-        def EnsureLegacyPathExists(path):
-            return path == os.path.join(DEPOT_TOOLS_ROOT, "metrics.cfg")
-
-        self.isfile.side_effect = EnsureLegacyPathExists
+    def testReadPathFallsBackToLegacyWithoutMutating(self):
+        legacy_path = os.path.join(self.legacy_dir, "metrics.cfg")
+        expected_path = os.path.join(self.config_dir, "metrics.cfg")
 
         self.assertEqual(
-            os.path.join(self.config_dir, "metrics.cfg"),
-            utils.depot_tools_config_path("metrics.cfg"),
+            expected_path, utils.depot_tools_config_read_path("metrics.cfg")
         )
-        self.move.assert_called_once_with(
-            os.path.join(DEPOT_TOOLS_ROOT, "metrics.cfg"),
-            os.path.join(self.config_dir, "metrics.cfg"),
+        self.assertFalse(os.path.exists(self.config_dir))
+
+        with open(legacy_path, "w") as f:
+            f.write("{}")
+        self.assertEqual(
+            legacy_path, utils.depot_tools_config_read_path("metrics.cfg")
         )
+        self.assertFalse(os.path.exists(self.config_dir))
+        self.assertTrue(os.path.isfile(legacy_path))
+
+        os.makedirs(self.config_dir)
+        with open(expected_path, "w") as f:
+            f.write("{}")
+        self.assertEqual(
+            expected_path, utils.depot_tools_config_read_path("metrics.cfg")
+        )
+
+    def testPrepareWriteCreatesConfigDir(self):
+        expected_path = os.path.join(self.config_dir, "metrics.cfg")
+
+        self.assertEqual(
+            expected_path,
+            utils.prepare_depot_tools_config_write("metrics.cfg"),
+        )
+        self.assertTrue(os.path.isdir(self.config_dir))
+
+    def testPrepareWriteMovesLegacy(self):
+        legacy_path = os.path.join(self.legacy_dir, "metrics.cfg")
+        expected_path = os.path.join(self.config_dir, "metrics.cfg")
+        with open(legacy_path, "w") as f:
+            f.write('{"legacy": true}')
+
+        self.assertEqual(
+            expected_path,
+            utils.prepare_depot_tools_config_write("metrics.cfg"),
+        )
+        self.assertFalse(os.path.exists(legacy_path))
+        with open(expected_path) as f:
+            self.assertEqual('{"legacy": true}', f.read())
+
+        # When expected_path already exists, a legacy file is left untouched.
+        with open(legacy_path, "w") as f:
+            f.write('{"stale": true}')
+        self.assertEqual(
+            expected_path,
+            utils.prepare_depot_tools_config_write("metrics.cfg"),
+        )
+        self.assertTrue(os.path.isfile(legacy_path))
 
 
 if __name__ == "__main__":

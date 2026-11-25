@@ -42,6 +42,19 @@ def depot_tools_config_dir():
 
 
 def depot_tools_config_path(file):
+    return os.path.join(depot_tools_config_dir(), file)
+
+
+def depot_tools_config_read_path(file):
+    expected_path = depot_tools_config_path(file)
+    if not os.path.isfile(expected_path):
+        legacy_path = os.path.join(DEPOT_TOOLS_ROOT, file)
+        if os.path.isfile(legacy_path):
+            return legacy_path
+    return expected_path
+
+
+def prepare_depot_tools_config_write(file):
     config_dir = depot_tools_config_dir()
     expected_path = os.path.join(config_dir, file)
 

@@ -20,7 +20,7 @@ import subprocess2
 import utils
 
 DEPOT_TOOLS = os.path.dirname(os.path.abspath(__file__))
-CONFIG_FILE = utils.depot_tools_config_path("metrics.cfg")
+_CONFIG_FILE_NAME = "metrics.cfg"
 UPLOAD_SCRIPT = os.path.join(DEPOT_TOOLS, "upload_metrics.py")
 
 DEFAULT_COUNTDOWN = 10
@@ -67,7 +67,8 @@ class _Config(object):
             return
 
         try:
-            config = json.loads(gclient_utils.FileRead(CONFIG_FILE))
+            config_file = utils.depot_tools_config_read_path(_CONFIG_FILE_NAME)
+            config = json.loads(gclient_utils.FileRead(config_file))
         except (IOError, ValueError):
             config = {}
 
@@ -99,7 +100,10 @@ class _Config(object):
 
     def _write_config(self):
         try:
-            gclient_utils.FileWrite(CONFIG_FILE, json.dumps(self._config))
+            config_file = utils.prepare_depot_tools_config_write(
+                _CONFIG_FILE_NAME
+            )
+            gclient_utils.FileWrite(config_file, json.dumps(self._config))
         except IOError as e:
             print(PERMISSION_DENIED_WARNING % e, file=sys.stderr)
             self._config["opt-in"] = False

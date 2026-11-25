@@ -3,6 +3,9 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+import contextlib
+import importlib
+import io
 import json
 import os
 import subprocess
@@ -85,6 +88,35 @@ class BuildTelemetryTest(unittest.TestCase):
                 # build_telemetry.check_auth() is an expensive call.
                 # The cached result should be reused.
                 check_auth.assert_called_once()
+
+            build_telemetry.load_config(cfg_path).save()
+            with open(cfg_path) as f:
+                self.assertEqual(
+                    json.load(f),
+                    {
+                        "user": "bob@google.com",
+                        "status": None,
+                        "countdown": test_countdown,
+                        "version": build_telemetry.VERSION,
+                    },
+                )
+
+            fresh_save_path = os.path.join(tmpdir, "fresh_save.cfg")
+            self.assertEqual(
+                build_telemetry.load_config(fresh_save_path).version,
+                build_telemetry.VERSION,
+            )
+            build_telemetry.load_config(fresh_save_path, test_countdown).save()
+            with open(fresh_save_path) as f:
+                self.assertEqual(
+                    json.load(f),
+                    {
+                        "user": "",
+                        "status": None,
+                        "countdown": test_countdown,
+                        "version": build_telemetry.VERSION,
+                    },
+                )
 
     @unittest.mock.patch("shutil.which")
     def test_enabled(self, mock_shutil):
@@ -196,6 +228,77 @@ class BuildTelemetryTest(unittest.TestCase):
                 self.assertEqual(cfg.countdown, test_countdown)
                 cfg._show_notice.assert_not_called()
                 check_auth.assert_not_called()
+
+    def test_default_config_paths_are_lazy(self) -> None:
+        with (
+            unittest.mock.patch(
+                "utils.depot_tools_config_path", autospec=True
+            ) as config_path,
+            unittest.mock.patch(
+                "utils.depot_tools_config_read_path", autospec=True
+            ) as read_path,
+            unittest.mock.patch(
+                "utils.prepare_depot_tools_config_write", autospec=True
+            ) as write_path,
+        ):
+            importlib.reload(build_telemetry)
+            build_telemetry.load_config()
+            config_path.assert_not_called()
+            read_path.assert_not_called()
+            write_path.assert_not_called()
+
+            with unittest.mock.patch.dict(
+                os.environ, {"DEPOT_TOOLS_BUILD_TELEMETRY": "0"}
+            ):
+                self.assertFalse(build_telemetry.enabled())
+            read_path.assert_not_called()
+            write_path.assert_not_called()
+
+    def test_default_config_delegates_read_and_write_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            legacy_cfg = os.path.join(tmpdir, "legacy.cfg")
+            expected_cfg = os.path.join(tmpdir, "expected.cfg")
+            with open(legacy_cfg, "w") as f:
+                json.dump(
+                    {
+                        "user": "bob@google.com",
+                        "status": "opt-out",
+                        "countdown": 5,
+                        "version": build_telemetry.VERSION,
+                    },
+                    f,
+                )
+
+            with (
+                unittest.mock.patch(
+                    "utils.depot_tools_config_path",
+                    autospec=True,
+                    return_value=expected_cfg,
+                ),
+                unittest.mock.patch(
+                    "utils.depot_tools_config_read_path",
+                    autospec=True,
+                    return_value=legacy_cfg,
+                ) as read_path,
+                unittest.mock.patch(
+                    "utils.prepare_depot_tools_config_write",
+                    autospec=True,
+                    return_value=expected_cfg,
+                ) as prepare_write,
+            ):
+                cfg = build_telemetry.load_config()
+                self.assertEqual(cfg.path, expected_cfg)
+                self.assertEqual(cfg.status(), "opt-out")
+                self.assertTrue(cfg.is_googler)
+                self.assertEqual(cfg.countdown, 5)
+                read_path.assert_called_once_with("build_telemetry.cfg")
+                prepare_write.assert_not_called()
+
+                with contextlib.redirect_stdout(io.StringIO()):
+                    cfg.opt_in()
+                prepare_write.assert_called_once_with("build_telemetry.cfg")
+                with open(expected_cfg) as f:
+                    self.assertEqual(json.load(f)["status"], "opt-in")
 
 
 if __name__ == "__main__":

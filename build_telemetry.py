@@ -4,6 +4,7 @@
 # found in the LICENSE file.
 
 import argparse
+import functools
 import json
 import logging
 import os
@@ -20,7 +21,7 @@ if sys.platform.startswith(("cygwin", "win")):
 
 _ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
 
-_DEFAULT_CONFIG_PATH = utils.depot_tools_config_path("build_telemetry.cfg")
+_CONFIG_FILE_NAME = "build_telemetry.cfg"
 
 _DEFAULT_COUNTDOWN = 10
 
@@ -35,11 +36,20 @@ def _cipd_path() -> str:
 
 class Config:
     def __init__(self, config_path, countdown):
-        self._config_path = config_path
+        self._explicit_config_path = config_path
+        self._countdown = countdown
         self._notice_displayed = False
+
+    @functools.cached_property
+    def _config(self):
+        read_path = (
+            self._explicit_config_path
+            if self._explicit_config_path is not None
+            else utils.depot_tools_config_read_path(_CONFIG_FILE_NAME)
+        )
         config = {}
-        if os.path.isfile(self._config_path):
-            with open(self._config_path) as f:
+        if os.path.isfile(read_path):
+            with open(read_path) as f:
                 try:
                     config = json.load(f)
                 except Exception:
@@ -51,18 +61,26 @@ class Config:
             config = {
                 "user": "",
                 "status": None,
-                "countdown": countdown,
+                "countdown": self._countdown,
                 "version": VERSION,
             }
-        self._config = config
+        return config
 
     def save(self):
-        with open(self._config_path, "w") as f:
-            json.dump(self._config, f)
+        config = self._config
+        write_path = (
+            self._explicit_config_path
+            if self._explicit_config_path is not None
+            else utils.prepare_depot_tools_config_write(_CONFIG_FILE_NAME)
+        )
+        with open(write_path, "w") as f:
+            json.dump(config, f)
 
     @property
     def path(self):
-        return self._config_path
+        if self._explicit_config_path is not None:
+            return self._explicit_config_path
+        return utils.depot_tools_config_path(_CONFIG_FILE_NAME)
 
     @property
     def is_corp_machine(self):
@@ -137,7 +155,7 @@ class Config:
         return self._config["status"]
 
 
-def load_config(cfg_path=_DEFAULT_CONFIG_PATH, countdown=_DEFAULT_COUNTDOWN):
+def load_config(cfg_path=None, countdown=_DEFAULT_COUNTDOWN):
     """Loads the config from the default location."""
     return Config(cfg_path, countdown)
 

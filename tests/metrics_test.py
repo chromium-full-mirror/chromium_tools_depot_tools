@@ -3,6 +3,8 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+import errno
+import importlib
 import json
 import os
 import sys
@@ -43,7 +45,18 @@ class MetricsCollectorTest(unittest.TestCase):
         # So that we don't have to update the tests every time we change the
         # version.
         mock.patch("metrics.metrics_utils.CURRENT_VERSION", 0).start()
+        mock.patch("metrics_utils.COLLECT_METRICS", True).start()
         mock.patch("metrics_utils.REPORT_BUILD", None).start()
+        self.read_config_path = mock.patch(
+            "utils.depot_tools_config_read_path",
+            autospec=True,
+            return_value=self.config_file,
+        ).start()
+        self.prepare_config_write = mock.patch(
+            "utils.prepare_depot_tools_config_write",
+            autospec=True,
+            return_value=self.config_file,
+        ).start()
         mock.patch("metrics.urllib.request", self.urllib_request).start()
         mock.patch("metrics.subprocess2.Popen", self.Popen).start()
         mock.patch("metrics.gclient_utils.FileWrite", self.FileWrite).start()
@@ -93,6 +106,7 @@ class MetricsCollectorTest(unittest.TestCase):
         self.addCleanup(mock.patch.stopall)
 
     def assert_writes_file(self, expected_filename, expected_content):
+        self.prepare_config_write.assert_called_once_with("metrics.cfg")
         self.assertEqual(len(self.FileWrite.mock_calls), 1)
         filename, content = self.FileWrite.mock_calls[0][1]
 
@@ -144,6 +158,42 @@ class MetricsCollectorTest(unittest.TestCase):
         self.assertTrue(self.collector.config.is_googler)
         self.assertFalse(self.collector.config.opted_in)
         self.assertEqual(self.collector.config.countdown, 10)
+
+    def test_disables_metrics_if_cant_prepare_config_write(self):
+        self.FileRead.side_effect = [IOError(2, "No such file or directory")]
+        mock_response = mock.Mock()
+        self.urllib_request.urlopen.side_effect = [mock_response]
+        mock_response.getcode.side_effect = [200]
+        self.prepare_config_write.side_effect = OSError(
+            errno.EROFS, "Read-only file system"
+        )
+
+        self.assertTrue(self.collector.config.is_googler)
+        self.assertFalse(self.collector.config.opted_in)
+        self.assertFalse(self.collector.config.should_collect_metrics)
+        self.FileWrite.assert_not_called()
+
+    def test_import_does_not_access_config_paths(self):
+        orig_collector = metrics.collector
+        self.addCleanup(setattr, metrics, "collector", orig_collector)
+        with mock.patch(
+            "utils.depot_tools_config_path", autospec=True
+        ) as config_path:
+            importlib.reload(metrics)
+        config_path.assert_not_called()
+        self.read_config_path.assert_not_called()
+        self.prepare_config_write.assert_not_called()
+
+    def test_reads_from_read_path_without_preparing_write(self):
+        self.read_config_path.return_value = "/legacy/metrics.cfg"
+        self.FileRead.side_effect = [
+            '{"is-googler": true, "countdown": 0, "opt-in": false, "version": 0}'
+        ]
+
+        self.assertFalse(self.collector.config.opted_in)
+        self.read_config_path.assert_called_once_with("metrics.cfg")
+        self.FileRead.assert_called_once_with("/legacy/metrics.cfg")
+        self.prepare_config_write.assert_not_called()
 
     def assert_collects_metrics(
         self, update_metrics=None, expected_vpython=None
@@ -491,22 +541,28 @@ class MetricsCollectorTest(unittest.TestCase):
 
     @mock.patch("metrics_utils.COLLECT_METRICS", False)
     def test_doesnt_print_notice_disable_metrics_collection(self):
+        self.assertFalse(self.collector.config.should_collect_metrics)
         with self.assertRaises(SystemExit) as cm:
             with self.collector.print_notice_and_exit():
                 pass
         self.assertEqual(cm.exception.code, 0)
         self.assertFalse(self.print_notice.called)
-        # We shouldn't have tried to read the config file.
+        # We shouldn't have tried to read or prepare the config file.
+        self.read_config_path.assert_not_called()
+        self.prepare_config_write.assert_not_called()
         self.assertFalse(self.FileRead.called)
 
     @mock.patch("metrics_utils.REPORT_BUILD", "p/b/b/1")
     def test_doesnt_print_notice_report_build(self):
+        self.assertTrue(self.collector.config.should_collect_metrics)
         with self.assertRaises(SystemExit) as cm:
             with self.collector.print_notice_and_exit():
                 pass
         self.assertEqual(cm.exception.code, 0)
         self.assertFalse(self.print_notice.called)
-        # We shouldn't have tried to read the config file.
+        # We shouldn't have tried to read or prepare the config file.
+        self.read_config_path.assert_not_called()
+        self.prepare_config_write.assert_not_called()
         self.assertFalse(self.FileRead.called)
 
     def test_print_notice_handles_exceptions(self):
