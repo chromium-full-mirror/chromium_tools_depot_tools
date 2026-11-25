@@ -149,6 +149,12 @@ def _FindMarkdownConfigFile(
     return markdown_config_cache[fpath]
 
 
+_LIT_TEMPLATE_DISABLE_FORMAT_RE = re.compile(
+    r"^\s*DisableFormat\s*:\s*(true|false)\s*(?:#.*)?$",
+    re.IGNORECASE,
+)
+
+
 def _FindLitTemplateFormatterConfigFile(
     fpath: str,
     config_cache: dict[str, Optional[str]],
@@ -165,6 +171,31 @@ def _FindLitTemplateFormatterConfigFile(
             fpath, ".style.lit_template_formatter", top_dir
         )
     return config_cache[fpath]
+
+
+def _IsLitTemplateFormatterDisabled(config_path: str) -> bool:
+    """Returns True if a .style.lit_template_formatter config sets
+    `DisableFormat: true`.
+    """
+    disabled = False
+    with open(config_path, "r", encoding="utf-8", errors="replace") as f:
+        for line in f:
+            stripped = line.strip()
+            if (
+                not stripped
+                or stripped.startswith("#")
+                or stripped in ("---", "...")
+            ):
+                continue
+            match = _LIT_TEMPLATE_DISABLE_FORMAT_RE.match(line)
+            if match:
+                disabled = match.group(1).lower() == "true"
+            else:
+                sys.stderr.write(
+                    f"Warning: Ignoring unrecognized line in {config_path}: "
+                    f"{stripped}\n"
+                )
+    return disabled
 
 
 def _RunClangFormatDiff(opts, paths, top_dir, diffs):
@@ -768,15 +799,22 @@ def _RunLitTemplateFormatter(
 ) -> int:
     """Runs lit_template_formatter on .html.ts files."""
     config_cache: dict[str, Optional[str]] = {}
+    disabled_cache: dict[str, bool] = {}
     target_path = opts.stdin_filename
-    paths = [
-        p
-        for p in paths
-        if _FindLitTemplateFormatterConfigFile(
-            target_path or p, config_cache, top_dir
+
+    def _IsEnabledForFile(fpath: str) -> bool:
+        config_path = _FindLitTemplateFormatterConfigFile(
+            target_path or fpath, config_cache, top_dir
         )
-        is not None
-    ]
+        if config_path is None:
+            return False
+        if config_path not in disabled_cache:
+            disabled_cache[config_path] = _IsLitTemplateFormatterDisabled(
+                config_path
+            )
+        return not disabled_cache[config_path]
+
+    paths = [p for p in paths if _IsEnabledForFile(p)]
     if not paths:
         return 0
 
@@ -1228,6 +1266,13 @@ def CMDformat(parser: optparse.OptionParser, args: list[str]):
         help="Disables formatting of various file types using clang-format.",
     )
     parser.add_option(
+        "--no-lit-template-formatter",
+        dest="lit_template_formatter",
+        action="store_false",
+        default=True,
+        help="Disables formatting of Lit HTML templates (.html.ts).",
+    )
+    parser.add_option(
         "--python",
         action="store_true",
         help="Enables python formatting on all python files.",
@@ -1429,8 +1474,9 @@ def CMDformat(parser: optparse.OptionParser, args: list[str]):
         (GN_EXTS, _RunGnFormat, []),
         ([".xml"], _RunMetricsXMLFormat, []),
         ([".md"], _RunMarkdownFormat, []),
-        ([".html.ts"], _RunLitTemplateFormatter, []),
     ]
+    if opts.lit_template_formatter:
+        formatters.append(([".html.ts"], _RunLitTemplateFormatter, []))
     if not opts.no_java:
         formatters.append(([".java"], _RunGoogleJavaFormat, []))
     if not opts.no_ktfmt:

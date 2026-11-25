@@ -162,9 +162,10 @@ class CMDFormatTestCase(unittest.TestCase):
     def _make_markdown_config(self, path):
         self._make_temp_file(os.path.join(path, ".style.mdformat"), [])
 
-    def _make_lit_template_formatter_config(self, path):
+    def _make_lit_template_formatter_config(self, path, contents=None):
         self._make_temp_file(
-            os.path.join(path, ".style.lit_template_formatter"), []
+            os.path.join(path, ".style.lit_template_formatter"),
+            contents if contents is not None else [],
         )
 
     def testMarkdownFormat(self):
@@ -372,6 +373,123 @@ class CMDFormatTestCase(unittest.TestCase):
                 "--diff",
                 foo_html_ts,
             ],
+            cwd=self._top_dir,
+        )
+
+    @mock.patch("gclient_paths.GetChromiumSrcPath")
+    @mock.patch("cl_format.subprocess2.call")
+    def testLitTemplateFormatterDisableFormat(
+        self, mock_call, mock_solution_path
+    ):
+        mock_solution_path.return_value = self._top_dir
+        self._make_temp_file(
+            os.path.join(
+                "ui",
+                "webui",
+                "resources",
+                "tools",
+                "lit_template_formatter",
+                "main.js",
+            ),
+            ["// dummy"],
+        )
+        self._make_temp_file(
+            os.path.join("third_party", "node", "node.py"), ["# dummy"]
+        )
+        self._make_lit_template_formatter_config("webui")
+        self._make_lit_template_formatter_config(
+            os.path.join("webui", "disabled"),
+            ["DisableFormat: true  # fixture dir"],
+        )
+        self._make_lit_template_formatter_config(
+            os.path.join("webui", "disabled", "re_enabled"),
+            ["DisableFormat: false"],
+        )
+
+        enabled_file = os.path.join(self._top_dir, "webui", "a.html.ts")
+        disabled_file = os.path.join(
+            self._top_dir, "webui", "disabled", "b.html.ts"
+        )
+        re_enabled_file = os.path.join(
+            self._top_dir, "webui", "disabled", "re_enabled", "c.html.ts"
+        )
+        unconfigured_file = os.path.join(self._top_dir, "other", "d.html.ts")
+        for rel in (
+            os.path.join("webui", "a.html.ts"),
+            os.path.join("webui", "disabled", "b.html.ts"),
+            os.path.join("webui", "disabled", "re_enabled", "c.html.ts"),
+            os.path.join("other", "d.html.ts"),
+        ):
+            self._make_temp_file(rel, ["// test"])
+
+        expected_formatter = os.path.join(
+            self._top_dir,
+            "ui",
+            "webui",
+            "resources",
+            "tools",
+            "lit_template_formatter",
+            "main.js",
+        )
+        expected_node = os.path.join(
+            self._top_dir, "third_party", "node", "node.py"
+        )
+
+        mock_call.return_value = 0
+        mock_opts = mock.Mock(dry_run=False, diff=False, stdin_filename=None)
+        stderr = io.StringIO()
+        with mock.patch("sys.stderr", stderr):
+            self.assertEqual(
+                0,
+                cl_format._RunLitTemplateFormatter(
+                    mock_opts,
+                    [
+                        enabled_file,
+                        disabled_file,
+                        re_enabled_file,
+                        unconfigured_file,
+                    ],
+                    self._top_dir,
+                    None,
+                ),
+            )
+        self.assertEqual("", stderr.getvalue())
+        mock_call.assert_called_once_with(
+            [
+                "vpython3",
+                expected_node,
+                expected_formatter,
+                enabled_file,
+                re_enabled_file,
+            ],
+            cwd=self._top_dir,
+        )
+
+        # Unrecognized lines (e.g., typos) emit one warning per config file.
+        mock_call.reset_mock()
+        self._make_lit_template_formatter_config(
+            "typo_dir",
+            ["---", "# comment", "", "DisableFormat: ture"],
+        )
+        typo_a = os.path.join(self._top_dir, "typo_dir", "a.html.ts")
+        typo_b = os.path.join(self._top_dir, "typo_dir", "b.html.ts")
+        self._make_temp_file(os.path.join("typo_dir", "a.html.ts"), ["// test"])
+        self._make_temp_file(os.path.join("typo_dir", "b.html.ts"), ["// test"])
+
+        stderr = io.StringIO()
+        with mock.patch("sys.stderr", stderr):
+            self.assertEqual(
+                0,
+                cl_format._RunLitTemplateFormatter(
+                    mock_opts, [typo_a, typo_b], self._top_dir, None
+                ),
+            )
+        self.assertEqual(
+            1, stderr.getvalue().count("Ignoring unrecognized line")
+        )
+        self.assertIn("DisableFormat: ture", stderr.getvalue())
+        mock_call.assert_called_once_with(
+            ["vpython3", expected_node, expected_formatter, typo_a, typo_b],
             cwd=self._top_dir,
         )
 
@@ -2558,6 +2676,51 @@ class TestCogAndNonGitFormatting(unittest.TestCase):
                         self.test_dir,
                         mock.ANY,
                     )
+
+    @mock.patch("cl_format._RunLitTemplateFormatter", return_value=0)
+    def test_no_lit_template_formatter_flag(self, mock_lit_format):
+        diff_path = os.path.join(self.test_dir, "input.diff")
+        with open(diff_path, "w", encoding="utf-8") as f:
+            f.write(
+                "diff --git a/ui/foo.html.ts b/ui/foo.html.ts\n"
+                "--- a/ui/foo.html.ts\n"
+                "+++ b/ui/foo.html.ts\n"
+                "@@ -1 +1 @@\n"
+                "-// old\n"
+                "+// new\n"
+            )
+        err = cl_format.subprocess2.CalledProcessError(
+            128,
+            ["git", "rev-parse", "--show-cdup"],
+            self.test_dir,
+            b"",
+            b"fatal: not a git repository\n",
+        )
+        with (
+            mock.patch("gclient_utils.IsEnvCog", return_value=True),
+            mock.patch("scm.GIT.GetCheckoutRoot", side_effect=err),
+            mock.patch("cl_format.settings", git_cl.settings.__class__()),
+        ):
+            ret = git_cl.main(
+                ["format", "--dry-run", "--input_diff_file", diff_path]
+            )
+            self.assertEqual(0, ret)
+            mock_lit_format.assert_called_once_with(
+                mock.ANY, ["ui/foo.html.ts"], self.test_dir, mock.ANY
+            )
+
+            mock_lit_format.reset_mock()
+            ret = git_cl.main(
+                [
+                    "format",
+                    "--dry-run",
+                    "--no-lit-template-formatter",
+                    "--input_diff_file",
+                    diff_path,
+                ]
+            )
+            self.assertEqual(0, ret)
+            mock_lit_format.assert_not_called()
 
 
 if __name__ == "__main__":
