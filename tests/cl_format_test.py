@@ -2400,6 +2400,29 @@ class TestStdinFilenameFormatting(unittest.TestCase):
                 )
                 self.assertEqual(b"int x;\n", self._read(temp_file))
 
+    @mock.patch(
+        "clang_format.FindClangFormatToolInChromiumTree",
+        return_value="/fake/clang-format",
+    )
+    @mock.patch("cl_format.RunCommand", return_value="")
+    def test_clang_format_stdin_preserves_ignored_file(
+        self, mock_run, mock_find_tool
+    ):
+        """Empty stdout (ignored file) leaves the file content unchanged."""
+        original = b"int  x;\n"
+        temp_file = self._write("temp.cc", original)
+        opts = mock.Mock(stdin_filename="ignored/bar.cc", lines=[])
+        ret = cl_format._RunClangFormatDiff(
+            opts, [temp_file], self.test_dir, None
+        )
+        self.assertEqual(0, ret)
+        mock_run.assert_called_once_with(
+            ["/fake/clang-format", "--assume-filename=ignored/bar.cc"],
+            stdin=original,
+            cwd=self.test_dir,
+        )
+        self.assertEqual(original, self._read(temp_file))
+
     def test_lines_requires_stdin_filename(self):
         stderr = io.StringIO()
         # CMDformat consults settings while registering options, which would

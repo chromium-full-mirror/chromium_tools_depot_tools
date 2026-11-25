@@ -226,6 +226,10 @@ def _RunClangFormatDiff(opts, paths, top_dir, diffs):
             with open(paths[0], "rb") as myfile:
                 input_bytes = myfile.read()
             stdout = RunCommand(cmd, stdin=input_bytes, cwd=top_dir)
+            # clang-format prints nothing for a file that matches a
+            # .clang-format-ignore entry. Leave such a file as it is.
+            if not stdout and input_bytes:
+                return 0
             # Write bytes rather than text so the formatter's line endings are
             # preserved verbatim instead of being re-translated by the platform.
             with open(paths[0], "wb") as myfile:
