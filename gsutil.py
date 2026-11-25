@@ -8,8 +8,10 @@ from __future__ import annotations
 
 import argparse
 import base64
+from collections.abc import Callable
 import contextlib
 import filecmp
+import getopt
 import hashlib
 import json
 import os
@@ -18,8 +20,9 @@ import signal
 import subprocess
 import sys
 import tempfile
+import time
 from types import FrameType
-from typing import Any, Optional
+from typing import Any, IO, Optional
 import urllib.request
 
 import gclient_utils
@@ -45,6 +48,34 @@ PREFER_LUCI_AUTH = True
 
 # Platforms unsupported by luci-auth.
 LUCI_AUTH_UNSUPPORTED_PLATFORMS = ["aix", "zos"]
+
+_403_RETRIES = 2
+_403_RETRY_DELAY_S = 1.0
+_ACCESS_DENIED_403 = b"AccessDeniedException: 403"
+_ANONYMOUS_CALLER = b"Anonymous caller"
+_STDERR_TAIL_BYTES = max(len(_ACCESS_DENIED_403), len(_ANONYMOUS_CALLER)) - 1
+
+# Mirrors gslib/utils/arg_helper.py (note upstream omits '=' on option/header).
+_GSUTIL_SHORT_OPTS = "dDvo:?h:i:u:mq"
+_GSUTIL_LONG_OPTS = [
+    "debug",
+    "detailedDebug",
+    "version",
+    "option",
+    "help",
+    "header",
+    "impersonate-service-account=",
+    "multithreaded",
+    "quiet",
+    "testexceptiontraces",
+    "trace-token=",
+    "perf-trace-token=",
+]
+# Allowlisted `cp` flags safe to retry; omits -A (all versions), -I (stdin),
+# -L (manifest append), -M (internal mv flag; deletes source), and -r/-R
+# (if attempt 1 creates dst, retry nests files under dst/<src>/, bypassing -n).
+_CP_SAFE_SHORT_OPTS = "a:cDej:JnpPs:tUvz:Z"
+_CP_SAFE_LONG_OPTS = ["stet"]
 
 
 class InvalidGsutilError(Exception):
@@ -171,14 +202,124 @@ def _is_luci_auth_supported_platform():
     )
 
 
-def luci_context(cmd, fallback=True):
-    """Helper to call`luci-auth context`."""
-    p = _luci_auth_cmd("context", wrapped_cmds=cmd)
+def _is_retryable_cp(args: list[str]) -> bool:
+    """Returns True for non-recursive `cp` calls eligible for 403 retry."""
+    try:
+        top_opts, rest = getopt.getopt(
+            args, _GSUTIL_SHORT_OPTS, _GSUTIL_LONG_OPTS
+        )
+    except getopt.GetoptError:
+        return False
+
+    if not rest or any(
+        opt in ("-v", "--version", "-?", "--help") for opt, _ in top_opts
+    ):
+        return False
+
+    subcmd, subargs = rest[0], rest[1:]
+    if subcmd not in ("cp", "copy"):
+        return False
+
+    try:
+        cp_opts, cp_pos = getopt.getopt(
+            subargs, _CP_SAFE_SHORT_OPTS, _CP_SAFE_LONG_OPTS
+        )
+    except getopt.GetoptError:
+        return False
+
+    if len(cp_pos) < 2 or any(
+        p == "-" or p.lower() == "file://-" for p in cp_pos
+    ):
+        return False
+    if any(opt == "-n" for opt, _ in cp_opts):
+        return True
+    return len(cp_pos) == 2 and not any(ch in cp_pos[0] for ch in "*?[]")
+
+
+def _is_auth_403(returncode: int, stderr: Optional[bytes]) -> bool:
+    # Ignore signal/crash exit codes (negative POSIX, >=128, Windows 0xC...).
+    return bool(
+        0 < returncode < 128
+        and stderr
+        and _ACCESS_DENIED_403 in stderr
+        and _ANONYMOUS_CALLER not in stderr
+    )
+
+
+def _check_auth_403(
+    p: subprocess.CompletedProcess,
+) -> tuple[subprocess.CompletedProcess, bool]:
+    return p, _is_auth_403(p.returncode, p.stderr)
+
+
+def _tee_stderr(stream: IO[bytes]) -> bool:
+    """Forwards child stderr live and returns whether an auth 403 appeared."""
+    saw_403 = False
+    saw_anon = False
+    tail = b""
+    pipe_broken = False
+    out = getattr(sys.stderr, "buffer", None)
+    if out is not None:
+        try:
+            sys.stderr.flush()
+        except BrokenPipeError:
+            pipe_broken = True
+    read = getattr(stream, "read1", stream.read)
+    while chunk := read(4096):
+        if out is not None and not pipe_broken:
+            try:
+                out.write(chunk)
+                out.flush()
+            except BrokenPipeError:
+                pipe_broken = True
+        window = tail + chunk
+        saw_403 = saw_403 or _ACCESS_DENIED_403 in window
+        saw_anon = saw_anon or _ANONYMOUS_CALLER in window
+        tail = window[-_STDERR_TAIL_BYTES:]
+    return saw_403 and not saw_anon
+
+
+def _retry_403(
+    run_fn: Callable[[], tuple[subprocess.CompletedProcess, bool]],
+) -> subprocess.CompletedProcess:
+    delay = _403_RETRY_DELAY_S
+    for attempt in range(_403_RETRIES):
+        p, should_retry = run_fn()
+        if not should_retry:
+            return p
+        with contextlib.suppress(BrokenPipeError):
+            print(
+                f"gsutil.py: got 403 AccessDeniedException; retrying in "
+                f"{delay:g}s (attempt {attempt + 2}/{_403_RETRIES + 1})...",
+                file=sys.stderr,
+                flush=True,
+            )
+        time.sleep(delay)
+        delay *= 2
+    return run_fn()[0]
+
+
+def _run_direct(
+    cmd: list[str], retry_403: bool = False
+) -> subprocess.CompletedProcess:
+    if not retry_403:
+        return _run_subprocess(cmd, interactive=True)
+    return _retry_403(lambda: _run_tee_stderr(cmd))
+
+
+def luci_context(cmd, fallback=True, retry_403=False):
+    """Helper to call `luci-auth context`."""
+    if retry_403:
+        p = _retry_403(
+            lambda: _check_auth_403(_luci_auth_cmd("context", wrapped_cmds=cmd))
+        )
+    else:
+        p = _luci_auth_cmd("context", wrapped_cmds=cmd)
 
     # If luci-auth is not logged in, fallback to normal execution.
     luci_not_logged_in = b"Not logged in." in p.stderr
     if luci_not_logged_in and fallback:
-        return _run_subprocess(cmd, interactive=True)
+        return _run_direct(cmd, retry_403=retry_403)
 
     if not luci_not_logged_in:
         _print_subprocess_result(p)
@@ -249,47 +390,75 @@ def _handle_sigterm(signum: int, _frame: Optional[FrameType]) -> None:
     raise SystemExit(128 + signum)
 
 
-def _run_subprocess(
+@contextlib.contextmanager
+def _managed_popen(
     cmd: list[str],
-    interactive: bool = False,
     env: Optional[dict[str, str]] = None,
-) -> subprocess.CompletedProcess:
-    """Wrapper to run the given command within a subprocess."""
+    **stdio: Any,
+):
     kwargs: dict[str, Any] = {
-        "shell": IS_WINDOWS and not cmd[0].lower().endswith(".exe")
+        "shell": IS_WINDOWS and not cmd[0].lower().endswith(".exe"),
+        **stdio,
     }
     if not IS_WINDOWS:
         kwargs["start_new_session"] = True
-
     if env:
         kwargs["env"] = dict(os.environ, **env)
-
-    if not interactive:
-        kwargs["stdout"] = subprocess.PIPE
-        kwargs["stderr"] = subprocess.PIPE
 
     with subprocess.Popen(cmd, **kwargs) as proc:
         old_sigterm = None
         try:
             with contextlib.suppress(ValueError):
                 old_sigterm = signal.signal(signal.SIGTERM, _handle_sigterm)
-            stdout, stderr = proc.communicate()
+            yield proc
         except BaseException:
             _kill_proc(proc)
             raise
         finally:
             if old_sigterm is not None:
                 signal.signal(signal.SIGTERM, old_sigterm)
-        return subprocess.CompletedProcess(cmd, proc.returncode, stdout, stderr)
+
+
+def _run_subprocess(
+    cmd: list[str],
+    interactive: bool = False,
+    env: Optional[dict[str, str]] = None,
+) -> subprocess.CompletedProcess:
+    """Wrapper to run the given command within a subprocess."""
+    stdio: dict[str, Any] = (
+        {}
+        if interactive
+        else {"stdout": subprocess.PIPE, "stderr": subprocess.PIPE}
+    )
+    with _managed_popen(cmd, env=env, **stdio) as proc:
+        stdout, stderr = proc.communicate()
+    return subprocess.CompletedProcess(cmd, proc.returncode, stdout, stderr)
+
+
+def _run_tee_stderr(
+    cmd: list[str],
+) -> tuple[subprocess.CompletedProcess, bool]:
+    with _managed_popen(cmd, stderr=subprocess.PIPE) as proc:
+        assert proc.stderr is not None
+        saw_auth_403 = _tee_stderr(proc.stderr)
+        proc.wait()
+    return (
+        subprocess.CompletedProcess(cmd, proc.returncode),
+        0 < proc.returncode < 128 and saw_auth_403,
+    )
 
 
 def _print_subprocess_result(p):
     """Prints the subprocess result to stdout & stderr."""
     if p.stdout:
+        sys.stdout.flush()
         sys.stdout.buffer.write(p.stdout)
+        sys.stdout.buffer.flush()
 
     if p.stderr:
+        sys.stderr.flush()
         sys.stderr.buffer.write(p.stderr)
+        sys.stderr.buffer.flush()
 
 
 def get_boto_path():
@@ -345,20 +514,24 @@ def run_gsutil(target, args, clean=False):
     )
 
     boto_path = get_boto_path()
+    retry_403 = _is_retryable_cp(args)
 
     # Try luci-auth early even if a boto file exists.
     if PREFER_LUCI_AUTH and boto_path:
         # Skip wrapping commands if luci-auth is already being used or if the
         # platform is unsupported by luci-auth.
         if _is_luci_context() or not _is_luci_auth_supported_platform():
-            return _run_subprocess(cmd, interactive=True).returncode
+            return _run_direct(cmd, retry_403=retry_403).returncode
 
         # Wrap gsutil with luci-auth context. If not logged in and boto is
         # present don't fallback to normal execution, fallback to normal
         # flow below.
-        p = luci_context(cmd, fallback=False).returncode
-        if not p:
-            return p
+        p = luci_context(cmd, fallback=False, retry_403=retry_403)
+        if not p.returncode:
+            return 0
+        # Skip retrying .boto if luci-auth already retried a 403.
+        if retry_403 and _is_auth_403(p.returncode, p.stderr):
+            retry_403 = False
 
     # When .boto is present, try without additional wrappers and handle specific
     # errors.
@@ -380,7 +553,10 @@ def run_gsutil(target, args, clean=False):
                 file=sys.stderr,
             )
 
-        p = _run_subprocess(cmd)
+        if retry_403:
+            p = _retry_403(lambda: _check_auth_403(_run_subprocess(cmd)))
+        else:
+            p = _run_subprocess(cmd)
 
         # Notify user that their .boto file might be outdated.
         if b"Your credentials are invalid." in p.stderr:
@@ -405,10 +581,10 @@ def run_gsutil(target, args, clean=False):
     # Skip wrapping commands if luci-auth is already being used or if the
     # platform is unsupported by luci-auth.
     if _is_luci_context() or not _is_luci_auth_supported_platform():
-        return _run_subprocess(cmd, interactive=True).returncode
+        return _run_direct(cmd, retry_403=retry_403).returncode
 
     # Wrap gsutil with luci-auth context.
-    return luci_context(cmd).returncode
+    return luci_context(cmd, retry_403=retry_403).returncode
 
 
 def parse_args():
