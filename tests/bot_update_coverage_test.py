@@ -1092,10 +1092,10 @@ class GetCommitPositionTest(unittest.TestCase):
         footer: str,
         local_refs: set[str] | None = None,
         mirror_refs: set[str] | None = None,
-        upstream_branches: dict[str, list[bool | None]] | None = None,
+        upstream_branches: dict[str, bool] | None = None,
         shallow: bool = False,
         has_origin: bool = True,
-    ) -> tuple[str | None, list[str], list[int]]:
+    ) -> tuple[str | None, list[str]]:
         """Runs `get_commit_position()` against a fake git checkout.
 
         Args:
@@ -1103,22 +1103,17 @@ class GetCommitPositionTest(unittest.TestCase):
             local_refs: Remote-tracking refs that the commit is reachable from.
             mirror_refs: Refs of the git cache mirror that the commit is
                 reachable from, or None if `origin` is not a local mirror.
-            upstream_branches: Maps each upstream branch to a list of
-                per-attempt outcomes (True/False for ancestor check, None to
-                simulate a failed git fetch; the last entry repeats if more
-                attempts occur).
+            upstream_branches: Maps each upstream branch to whether the commit
+                is reachable from it.
             shallow: Whether the checkout is shallow.
             has_origin: Whether the checkout has an `origin` remote.
 
         Returns:
-            The commit position, fetched branches, and retry sleep delays.
+            The commit position, and the branches that were fetched.
         """
         local_refs = local_refs or set()
         upstream_branches = upstream_branches or {}
         fetches = []
-        sleeps = []
-        branch_attempts: dict[str, int] = {}
-        last_fetch_result: list[bool] = [False]
         with tempfile.TemporaryDirectory() as mirror:
 
             def git_stub(*args: str, **_: Any) -> str:
@@ -1138,15 +1133,8 @@ class GetCommitPositionTest(unittest.TestCase):
                     self.assertEqual(
                         args[1:4], ("--no-tags", "--", self.UPSTREAM_URL)
                     )
-                    branch = args[4]
-                    fetches.append(branch)
-                    if branch in upstream_branches:
-                        outcomes = upstream_branches[branch]
-                        idx = branch_attempts.get(branch, 0)
-                        branch_attempts[branch] = idx + 1
-                        step = outcomes[min(idx, len(outcomes) - 1)]
-                        ok = step is not None
-                        last_fetch_result[0] = bool(step)
+                    fetches.append(args[4])
+                    ok = args[4] in upstream_branches
                 elif args[0] == f"--git-dir={mirror}":
                     self.assertEqual(
                         args[1:4], ("merge-base", "--is-ancestor", self.SHA)
@@ -1154,7 +1142,7 @@ class GetCommitPositionTest(unittest.TestCase):
                     ok = args[4] in mirror_refs
                 elif args[:3] == ("merge-base", "--is-ancestor", "HEAD"):
                     if args[3] == "FETCH_HEAD":
-                        ok = last_fetch_result[0]
+                        ok = upstream_branches[fetches[-1]]
                     else:
                         ok = args[3] in local_refs
                 else:
@@ -1163,11 +1151,8 @@ class GetCommitPositionTest(unittest.TestCase):
                     raise bot_update.SubprocessFailed("git failed", 1, "")
                 return ""
 
-            with (
-                mock.patch.object(bot_update, "git", git_stub),
-                mock.patch.object(bot_update.time, "sleep", sleeps.append),
-            ):
-                return bot_update.get_commit_position("src"), fetches, sleeps
+            with mock.patch.object(bot_update, "git", git_stub):
+                return bot_update.get_commit_position("src"), fetches
 
     def testGetCommitPosition(self) -> None:
         main = "refs/remotes/origin/main"
@@ -1175,8 +1160,6 @@ class GetCommitPositionTest(unittest.TestCase):
         main_cp = "refs/heads/main@{#123}"
         master_cp = "refs/heads/master@{#45}"
         branch_cp = "refs/branch-heads/7000@{#6}"
-        all_delays = list(bot_update._REMOTE_BRANCH_RETRY_DELAYS)
-        max_attempts = len(all_delays) + 1
         cases = {
             "no footer": dict(footer="Bug: 1", want=None),
             "on main": dict(
@@ -1210,25 +1193,9 @@ class GetCommitPositionTest(unittest.TestCase):
             "stale local ref and mirror": dict(
                 footer=f"Cr-Commit-Position: {main_cp}",
                 mirror_refs=set(),
-                upstream_branches={"refs/heads/main": [True]},
+                upstream_branches={"refs/heads/main": True},
                 want=main_cp,
                 fetches=["refs/heads/main"],
-            ),
-            "upstream replica lag recovers on retry": dict(
-                footer=f"Cr-Commit-Position: {main_cp}",
-                mirror_refs=set(),
-                upstream_branches={"refs/heads/main": [False, False, True]},
-                want=main_cp,
-                fetches=["refs/heads/main"] * 3,
-                sleeps=all_delays[:2],
-            ),
-            "upstream fetch error recovers on retry": dict(
-                footer=f"Cr-Commit-Position: {main_cp}",
-                mirror_refs=set(),
-                upstream_branches={"refs/heads/main": [None, True]},
-                want=main_cp,
-                fetches=["refs/heads/main"] * 2,
-                sleeps=all_delays[:1],
             ),
             "master renamed to main": dict(
                 footer=f"Cr-Commit-Position: {master_cp}",
@@ -1237,15 +1204,15 @@ class GetCommitPositionTest(unittest.TestCase):
             ),
             "master renamed to main, upstream": dict(
                 footer=f"Cr-Commit-Position: {master_cp}",
-                upstream_branches={"refs/heads/main": [True]},
+                upstream_branches={"refs/heads/main": True},
                 want=master_cp,
                 fetches=["refs/heads/master", "refs/heads/main"],
             ),
             "master stale upstream, on main": dict(
                 footer=f"Cr-Commit-Position: {master_cp}",
                 upstream_branches={
-                    "refs/heads/master": [False],
-                    "refs/heads/main": [True],
+                    "refs/heads/master": False,
+                    "refs/heads/main": True,
                 },
                 want=master_cp,
                 fetches=["refs/heads/master", "refs/heads/main"],
@@ -1253,18 +1220,16 @@ class GetCommitPositionTest(unittest.TestCase):
             "unsubmitted patchset": dict(
                 footer=f"Cr-Commit-Position: {main_cp}",
                 mirror_refs=set(),
-                upstream_branches={"refs/heads/main": [False]},
+                upstream_branches={"refs/heads/main": False},
                 want=None,
-                fetches=["refs/heads/main"] * max_attempts,
-                sleeps=all_delays,
+                fetches=["refs/heads/main"],
             ),
             "original footer on another branch": dict(
                 footer=f"Cr-Original-Commit-Position: {main_cp}",
                 local_refs={"refs/remotes/origin/feature"},
-                upstream_branches={"refs/heads/main": [False]},
+                upstream_branches={"refs/heads/main": False},
                 want=None,
-                fetches=["refs/heads/main"] * max_attempts,
-                sleeps=all_delays,
+                fetches=["refs/heads/main"],
             ),
             "no fallback to original footer": dict(
                 footer=(
@@ -1273,12 +1238,11 @@ class GetCommitPositionTest(unittest.TestCase):
                 ),
                 local_refs={main},
                 want=None,
-                fetches=["refs/branch-heads/7000"] * max_attempts,
-                sleeps=all_delays,
+                fetches=["refs/branch-heads/7000"],
             ),
             "shallow checkout": dict(
                 footer=f"Cr-Commit-Position: {main_cp}",
-                upstream_branches={"refs/heads/main": [True]},
+                upstream_branches={"refs/heads/main": True},
                 shallow=True,
                 want=None,
             ),
@@ -1310,11 +1274,9 @@ class GetCommitPositionTest(unittest.TestCase):
             with self.subTest(name):
                 want = case.pop("want")
                 want_fetches = case.pop("fetches", [])
-                want_sleeps = case.pop("sleeps", [])
-                got, fetches, sleeps = self._getCommitPosition(**case)
+                got, fetches = self._getCommitPosition(**case)
                 self.assertEqual(got, want)
                 self.assertEqual(fetches, want_fetches)
-                self.assertEqual(sleeps, want_sleeps)
 
 
 class ParseArgsTest(unittest.TestCase):

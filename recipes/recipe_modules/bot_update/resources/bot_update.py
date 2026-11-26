@@ -970,11 +970,6 @@ def _is_ancestor(
     return False
 
 
-# Retry backoff delays (seconds) for upstream branch fetches when verifying
-# commit positions during Git-on-Borg replica lag.
-_REMOTE_BRANCH_RETRY_DELAYS = (5, 15, 30)
-
-
 def _is_on_remote_branch(git_path: str, revision: str, branch: str) -> bool:
   """Returns whether `revision` is reachable from the upstream `branch`.
 
@@ -1004,23 +999,13 @@ def _is_on_remote_branch(git_path: str, revision: str, branch: str) -> bool:
     url = git("remote", "get-url", "--push", "origin", cwd=git_path).strip()
   except SubprocessFailed:
     return False
-  total_attempts = len(_REMOTE_BRANCH_RETRY_DELAYS) + 1
-  for attempt in range(total_attempts):
-    if attempt > 0:
-      delay = _REMOTE_BRANCH_RETRY_DELAYS[attempt - 1]
-      print(
-        f"Commit {revision} not yet reachable from {branches} in "
-        f"{git_path}; retrying upstream fetch in {delay}s "
-        f"(attempt {attempt + 1}/{total_attempts})"
-      )
-      time.sleep(delay)
-    for b in branches:
-      try:
-        git("fetch", "--no-tags", "--", url, b, cwd=git_path)
-      except SubprocessFailed:
-        continue
-      if _is_ancestor(git_path, revision, "FETCH_HEAD"):
-        return True
+  for b in branches:
+    try:
+      git("fetch", "--no-tags", "--", url, b, cwd=git_path)
+    except SubprocessFailed:
+      continue
+    if _is_ancestor(git_path, revision, "FETCH_HEAD"):
+      return True
   return False
 
 
